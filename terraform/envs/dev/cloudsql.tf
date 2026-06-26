@@ -1,5 +1,5 @@
 resource "google_sql_database_instance" "postgres" {
-  name             = "offline-map-postgres"
+  name             = "offline-map-postgres-dev-01"
   region           = var.region
   database_version = "POSTGRES_17"
 
@@ -11,7 +11,7 @@ resource "google_sql_database_instance" "postgres" {
     disk_size         = 20
     disk_autoresize   = true
 
-    activation_policy = "NEVER"
+    activation_policy = "ALWAYS"
 
     ip_configuration {
       ipv4_enabled    = false
