@@ -98,3 +98,33 @@ resource "google_service_account_iam_member" "migrations_workload_identity" {
 
   member = "serviceAccount:${local.workload_identity_pool}[${local.k8s_namespace}/migrations]"
 }
+#
+resource "google_service_account" "map_assets_publisher" {
+  account_id   = "offline-map-assets-publisher"
+  display_name = "Offline Map Assets Publisher"
+}
+
+resource "google_storage_bucket_iam_member" "map_assets_publisher_object_admin" {
+  bucket = google_storage_bucket.map_static.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.map_assets_publisher.email}"
+}
+
+resource "google_storage_bucket_iam_member" "map_static_public_read" {
+  bucket = google_storage_bucket.map_static.name
+  role   = "roles/storage.objectViewer"
+  member = "allUsers"
+}
+
+resource "google_service_account_iam_member" "map_assets_publisher_impersonation" {
+  for_each = toset(var.map_assets_publishers)
+
+  service_account_id = google_service_account.map_assets_publisher.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = each.value
+}
+resource "google_storage_bucket_iam_member" "map_assets_publisher_legacy_bucket_reader" {
+  bucket = google_storage_bucket.map_static.name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.map_assets_publisher.email}"
+}

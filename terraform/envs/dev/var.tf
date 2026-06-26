@@ -24,3 +24,8 @@ variable "map_cors_origins" {
   ]
 
 }
+variable "map_assets_publishers" {
+  description = "Users allowed to publish map assets"
+  type        = list(string)
+  default     = []
+}

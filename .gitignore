@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+
+init/data/*.pbf
+init/data/*.osm
+init/data/*.osm.pbf
+init/data/*.md5
+
+init/dist/*
+!init/dist/.gitkeep
+
+*.mbtiles
+*.pmtiles

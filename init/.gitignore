@@ -1,0 +1,18 @@
+# Init source map data
+init/data/*.pbf
+init/data/*.osm
+init/data/*.osm.pbf
+
+# Generated map artifacts
+init/dist/*
+!init/dist/.gitkeep
+
+# Large map outputs
+*.mbtiles
+*.pmtiles
+# Local env
+.env
+.env.*
+!.env.example
+
+

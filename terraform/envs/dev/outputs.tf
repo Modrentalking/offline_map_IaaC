@@ -57,3 +57,14 @@ output "migrations_gsa_email" {
 output "ci_gsa_email" {
   value = google_service_account.ci.email
 }
+output "map_assets_publisher_gsa_email" {
+  value = google_service_account.map_assets_publisher.email
+}
+
+output "map_current_pmtiles_url" {
+  value = "https://storage.googleapis.com/${google_storage_bucket.map_static.name}/current/belarus.pmtiles"
+}
+
+output "map_current_style_url" {
+  value = "https://storage.googleapis.com/${google_storage_bucket.map_static.name}/current/styles/simple/style.json"
+}
