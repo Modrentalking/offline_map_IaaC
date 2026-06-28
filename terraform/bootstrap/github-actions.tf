@@ -1,3 +1,17 @@
+resource "google_project_service" "iamcredentials" {
+  project = var.project_id
+  service = "iamcredentials.googleapis.com"
+
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "sts" {
+  project = var.project_id
+  service = "sts.googleapis.com"
+
+  disable_on_destroy = false
+}
+
 resource "google_service_account" "github_actions" {
   account_id   = "offline-map-github-actions"
   display_name = "Offline Map GitHub Actions"
@@ -27,10 +41,27 @@ resource "google_project_iam_member" "github_actions_roles" {
   member  = "serviceAccount:${google_service_account.github_actions.email}"
 }
 
+resource "google_storage_bucket_iam_member" "github_actions_state_object_admin" {
+  bucket = google_storage_bucket.terraform_state.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.github_actions.email}"
+}
+
+resource "google_storage_bucket_iam_member" "github_actions_state_bucket_reader" {
+  bucket = google_storage_bucket.terraform_state.name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.github_actions.email}"
+}
+
 resource "google_iam_workload_identity_pool" "github" {
   workload_identity_pool_id = "github-actions-pool"
   display_name              = "GitHub Actions Pool"
   description               = "Workload Identity Pool for GitHub Actions"
+
+  depends_on = [
+    google_project_service.iamcredentials,
+    google_project_service.sts
+  ]
 }
 
 resource "google_iam_workload_identity_pool_provider" "github" {
@@ -58,4 +89,11 @@ resource "google_service_account_iam_member" "github_actions_workload_identity_u
   role               = "roles/iam.workloadIdentityUser"
 
   member = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repository}"
+}
+
+resource "google_service_account_iam_member" "local_user_token_creator" {
+  service_account_id = google_service_account.github_actions.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+
+  member = "user:${var.local_impersonation_user}"
 }

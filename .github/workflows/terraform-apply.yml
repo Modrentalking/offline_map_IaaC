@@ -5,14 +5,14 @@ on:
     branches:
       - master
     paths:
-      - "terraform/**"
+      - "terraform/envs/dev/**"
       - ".github/workflows/terraform.yml"
 
   pull_request:
     branches:
       - master
     paths:
-      - "terraform/**"
+      - "terraform/envs/dev/**"
       - ".github/workflows/terraform.yml"
 
   workflow_dispatch:
@@ -22,8 +22,6 @@ permissions:
   id-token: write
 
 env:
-  TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
-  TF_VAR_region: ${{ vars.GCP_REGION }}
   TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
 
 jobs:
@@ -40,12 +38,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Normalize GitHub variables
+        id: ci_vars
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          PROJECT_ID="$(printf '%s' '${{ vars.GCP_PROJECT_ID }}' | tr -d '\r\n[:space:]')"
+          REGION="$(printf '%s' '${{ vars.GCP_REGION }}' | tr -d '\r\n[:space:]')"
+          SERVICE_ACCOUNT="$(printf '%s' '${{ vars.GCP_SERVICE_ACCOUNT }}' | tr -d '\r\n[:space:]')"
+          WIF_PROVIDER="$(printf '%s' '${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}' | tr -d '\r\n[:space:]')"
+          STATE_BUCKET="$(printf '%s' '${{ vars.TF_STATE_BUCKET }}' | tr -d '\r\n[:space:]')"
+
+          test -n "${PROJECT_ID}" || (echo "GCP_PROJECT_ID is empty" && exit 1)
+          test -n "${REGION}" || (echo "GCP_REGION is empty" && exit 1)
+          test -n "${SERVICE_ACCOUNT}" || (echo "GCP_SERVICE_ACCOUNT is empty" && exit 1)
+          test -n "${WIF_PROVIDER}" || (echo "GCP_WORKLOAD_IDENTITY_PROVIDER is empty" && exit 1)
+          test -n "${STATE_BUCKET}" || (echo "TF_STATE_BUCKET is empty" && exit 1)
+          test -n "${TF_VAR_db_password}" || (echo "DB_PASSWORD secret is empty" && exit 1)
+
+          echo "project_id=${PROJECT_ID}" >> "$GITHUB_OUTPUT"
+          echo "region=${REGION}" >> "$GITHUB_OUTPUT"
+          echo "service_account=${SERVICE_ACCOUNT}" >> "$GITHUB_OUTPUT"
+          echo "wif_provider=${WIF_PROVIDER}" >> "$GITHUB_OUTPUT"
+          echo "state_bucket=${STATE_BUCKET}" >> "$GITHUB_OUTPUT"
+
+          echo "TF_VAR_project_id=${PROJECT_ID}" >> "$GITHUB_ENV"
+          echo "TF_VAR_region=${REGION}" >> "$GITHUB_ENV"
+
       - name: Auth to Google Cloud
         uses: google-github-actions/auth@v3
         with:
-          project_id: ${{ vars.GCP_PROJECT_ID }}
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ steps.ci_vars.outputs.project_id }}
+          workload_identity_provider: ${{ steps.ci_vars.outputs.wif_provider }}
+          service_account: ${{ steps.ci_vars.outputs.service_account }}
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -55,48 +81,35 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "===== GitHub context ====="
           echo "Repository: ${{ github.repository }}"
-          echo "Ref name:   ${{ github.ref_name }}"
+          echo "Branch:     ${{ github.ref_name }}"
           echo "Event:      ${{ github.event_name }}"
           echo
-
-          echo "===== GitHub Variables ====="
-          echo "GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}"
-          echo "GCP_REGION=${{ vars.GCP_REGION }}"
-          echo "GCP_SERVICE_ACCOUNT=${{ vars.GCP_SERVICE_ACCOUNT }}"
-          echo "GCP_WORKLOAD_IDENTITY_PROVIDER=${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+          echo "Project:    ${{ steps.ci_vars.outputs.project_id }}"
+          echo "Region:     ${{ steps.ci_vars.outputs.region }}"
+          echo "Expected SA:${{ steps.ci_vars.outputs.service_account }}"
           echo
 
-          echo "===== Terraform variables ====="
-          test -n "${TF_VAR_project_id}" || (echo "ERROR: TF_VAR_project_id is empty" && exit 1)
-          test -n "${TF_VAR_region}" || (echo "ERROR: TF_VAR_region is empty" && exit 1)
-          test -n "${TF_VAR_db_password}" || (echo "ERROR: TF_VAR_db_password is empty" && exit 1)
-          echo "TF_VAR_project_id is set"
-          echo "TF_VAR_region is set"
-          echo "TF_VAR_db_password is set"
-          echo
-
-          echo "===== gcloud auth ====="
           gcloud auth list
           echo
 
-          echo "Active account:"
-          gcloud config get-value account || true
-          echo
+          echo "Check Terraform state bucket:"
+          gcloud storage ls "gs://${{ steps.ci_vars.outputs.state_bucket }}"
 
-          echo "Project config:"
-          gcloud config get-value project || true
-          echo
+      - name: Check forbidden files
+        working-directory: .
+        run: |
+          set -euo pipefail
 
-          echo "===== State bucket access test ====="
-          STATE_BUCKET="${{ vars.TF_STATE_BUCKET }}"
-          if [[ -z "${STATE_BUCKET}" ]]; then
-            STATE_BUCKET="${{ vars.GCP_PROJECT_ID }}-terraform-state"
+          forbidden_files="$(git ls-files | grep -E '\.env$|\.pbf$|\.pmtiles$|\.mbtiles$|terraform\.tfstate|terraform\.tfvars|init/dist/.+' | grep -v '^init/dist/.gitkeep$' || true)"
+
+          if [[ -n "${forbidden_files}" ]]; then
+            echo "Forbidden files found:"
+            echo "${forbidden_files}"
+            exit 1
           fi
 
-          echo "STATE_BUCKET=${STATE_BUCKET}"
-          gcloud storage ls "gs://${STATE_BUCKET}"
+          echo "OK"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -140,16 +153,47 @@ jobs:
         shell: bash
         working-directory: terraform/envs/dev
 
+    env:
+      TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Normalize GitHub variables
+        id: ci_vars
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          PROJECT_ID="$(printf '%s' '${{ vars.GCP_PROJECT_ID }}' | tr -d '\r\n[:space:]')"
+          REGION="$(printf '%s' '${{ vars.GCP_REGION }}' | tr -d '\r\n[:space:]')"
+          SERVICE_ACCOUNT="$(printf '%s' '${{ vars.GCP_SERVICE_ACCOUNT }}' | tr -d '\r\n[:space:]')"
+          WIF_PROVIDER="$(printf '%s' '${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}' | tr -d '\r\n[:space:]')"
+          STATE_BUCKET="$(printf '%s' '${{ vars.TF_STATE_BUCKET }}' | tr -d '\r\n[:space:]')"
+
+          test -n "${PROJECT_ID}" || (echo "GCP_PROJECT_ID is empty" && exit 1)
+          test -n "${REGION}" || (echo "GCP_REGION is empty" && exit 1)
+          test -n "${SERVICE_ACCOUNT}" || (echo "GCP_SERVICE_ACCOUNT is empty" && exit 1)
+          test -n "${WIF_PROVIDER}" || (echo "GCP_WORKLOAD_IDENTITY_PROVIDER is empty" && exit 1)
+          test -n "${STATE_BUCKET}" || (echo "TF_STATE_BUCKET is empty" && exit 1)
+          test -n "${TF_VAR_db_password}" || (echo "DB_PASSWORD secret is empty" && exit 1)
+
+          echo "project_id=${PROJECT_ID}" >> "$GITHUB_OUTPUT"
+          echo "region=${REGION}" >> "$GITHUB_OUTPUT"
+          echo "service_account=${SERVICE_ACCOUNT}" >> "$GITHUB_OUTPUT"
+          echo "wif_provider=${WIF_PROVIDER}" >> "$GITHUB_OUTPUT"
+          echo "state_bucket=${STATE_BUCKET}" >> "$GITHUB_OUTPUT"
+
+          echo "TF_VAR_project_id=${PROJECT_ID}" >> "$GITHUB_ENV"
+          echo "TF_VAR_region=${REGION}" >> "$GITHUB_ENV"
+
       - name: Auth to Google Cloud
         uses: google-github-actions/auth@v3
         with:
-          project_id: ${{ vars.GCP_PROJECT_ID }}
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ steps.ci_vars.outputs.project_id }}
+          workload_identity_provider: ${{ steps.ci_vars.outputs.wif_provider }}
+          service_account: ${{ steps.ci_vars.outputs.service_account }}
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -159,48 +203,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "===== GitHub context ====="
-          echo "Repository: ${{ github.repository }}"
-          echo "Ref name:   ${{ github.ref_name }}"
-          echo "Event:      ${{ github.event_name }}"
+          echo "Project:    ${{ steps.ci_vars.outputs.project_id }}"
+          echo "Expected SA:${{ steps.ci_vars.outputs.service_account }}"
           echo
 
-          echo "===== GitHub Variables ====="
-          echo "GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}"
-          echo "GCP_REGION=${{ vars.GCP_REGION }}"
-          echo "GCP_SERVICE_ACCOUNT=${{ vars.GCP_SERVICE_ACCOUNT }}"
-          echo "GCP_WORKLOAD_IDENTITY_PROVIDER=${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
-          echo
-
-          echo "===== Terraform variables ====="
-          test -n "${TF_VAR_project_id}" || (echo "ERROR: TF_VAR_project_id is empty" && exit 1)
-          test -n "${TF_VAR_region}" || (echo "ERROR: TF_VAR_region is empty" && exit 1)
-          test -n "${TF_VAR_db_password}" || (echo "ERROR: TF_VAR_db_password is empty" && exit 1)
-          echo "TF_VAR_project_id is set"
-          echo "TF_VAR_region is set"
-          echo "TF_VAR_db_password is set"
-          echo
-
-          echo "===== gcloud auth ====="
           gcloud auth list
           echo
 
-          echo "Active account:"
-          gcloud config get-value account || true
-          echo
-
-          echo "Project config:"
-          gcloud config get-value project || true
-          echo
-
-          echo "===== State bucket access test ====="
-          STATE_BUCKET="${{ vars.TF_STATE_BUCKET }}"
-          if [[ -z "${STATE_BUCKET}" ]]; then
-            STATE_BUCKET="${{ vars.GCP_PROJECT_ID }}-terraform-state"
-          fi
-
-          echo "STATE_BUCKET=${STATE_BUCKET}"
-          gcloud storage ls "gs://${STATE_BUCKET}"
+          echo "Check Terraform state bucket:"
+          gcloud storage ls "gs://${{ steps.ci_vars.outputs.state_bucket }}"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3

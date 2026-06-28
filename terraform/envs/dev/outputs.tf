@@ -68,10 +68,3 @@ output "map_current_pmtiles_url" {
 output "map_current_style_url" {
   value = "https://storage.googleapis.com/${google_storage_bucket.map_static.name}/current/styles/simple/style.json"
 }
-output "github_actions_gsa_email" {
-  value = google_service_account.github_actions.email
-}
-
-output "github_workload_identity_provider" {
-  value = google_iam_workload_identity_pool_provider.github.name
-}

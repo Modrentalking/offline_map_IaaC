@@ -30,8 +30,3 @@ variable "map_assets_publishers" {
   default     = []
 }
 
-variable "github_repository" {
-  description = "GitHub repository allowed to run Terraform from GitHub Actions"
-  type        = string
-  default     = "Modrentalking/offline_map_IaaC"
-}
