@@ -12,6 +12,8 @@ resource "google_project_service" "services" {
     "servicenetworking.googleapis.com",
     "dns.googleapis.com",
     "serviceusage.googleapis.com",
+    "iamcredentials.googleapis.com",
+    "sts.googleapis.com"
   ])
 
   project = var.project_id
