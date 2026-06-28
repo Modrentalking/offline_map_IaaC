@@ -2,38 +2,104 @@
 
 Terraform infrastructure for running the **Offline Map** project on Google Cloud Platform.
 
-## Resources Created
+## Current Status
 
-- VPC and subnet for GKE
-- Private Service Access for Cloud SQL
-- Cloud SQL PostgreSQL
-- GKE Autopilot
-- Artifact Registry
-- GCS buckets for map assets and uploads
-- Secret Manager
-- IAM and Workload Identity
-- Global static IP for Ingress
+The base cloud infrastructure is ready:
+
+* Terraform remote state
+* GitHub Actions CI/CD for Terraform
+* GKE Autopilot
+* Cloud SQL PostgreSQL
+* Artifact Registry
+* GCS buckets for map assets and uploads
+* Secret Manager
+* IAM and Workload Identity
+* Global static IP for future Ingress
 
 ## Structure
 
 ```text
 terraform/
-├── bootstrap/   # bucket for Terraform remote state
-├── envs/dev/    # dev infrastructure
-└── modules/     # future modules
+├── bootstrap/   # remote state, GitHub Actions identity, WIF
+├── envs/dev/    # application infrastructure
+└── modules/     # future reusable modules
 
-## Map assets
+init/            # map assets build and publish scripts
+.github/
+└── workflows/   # GitHub Actions pipelines
+```
+
+## Terraform
+
+### Bootstrap
+
+Bootstrap creates the base resources required for CI/CD:
+
+* Terraform state bucket
+* GitHub Actions service account
+* Workload Identity Federation
+* IAM permissions for Terraform automation
+
+Run locally:
+
+```bash
+cd terraform/bootstrap
+terraform init
+terraform plan
+terraform apply
+```
+
+### Dev environment
+
+Dev creates the application infrastructure:
+
+```bash
+cd terraform/envs/dev
+terraform init
+terraform plan
+terraform apply
+```
+
+## GitHub Actions
+
+Terraform workflow:
+
+```text
+push to master
+  → terraform plan
+
+manual workflow_dispatch
+  → terraform plan
+  → manual approval
+  → terraform apply
+```
+
+Required GitHub Variables:
+
+```text
+GCP_PROJECT_ID
+GCP_REGION
+GCP_SERVICE_ACCOUNT
+GCP_WORKLOAD_IDENTITY_PROVIDER
+TF_STATE_BUCKET
+```
+
+Required GitHub Secrets:
+
+```text
+DB_PASSWORD
+```
+
+## Map Assets Init
 
 The `init/` directory is used to build and publish map assets to GCS.
 
 It can:
 
-* download style and tilemaker files
-* download fresh Belarus OSM PBF
+* download style and tilemaker resources
+* download Belarus OSM PBF
 * build PMTiles
-* upload PMTiles and styles to the `map-static` bucket
-
-### Usage
+* publish PMTiles, styles and manifest to the map-static bucket
 
 Generate local `.env` from Terraform outputs:
 
@@ -41,46 +107,13 @@ Generate local `.env` from Terraform outputs:
 ./init/generate-env-from-terraform.sh
 ```
 
-Download style and tilemaker resources:
-
-```bash
-./init/fetch-map-assets-from-github.sh
-```
-
-Build PMTiles:
-
-```bash
-./init/build-map.sh
-```
-
-Force fresh PBF download:
-
-```bash
-FORCE_DOWNLOAD_PBF=true ./init/build-map.sh
-```
-
-Publish assets to GCS:
-
-```bash
-./init/publish-map-assets.sh
-```
-
-Or run full flow:
+Run full local flow:
 
 ```bash
 FORCE_DOWNLOAD_PBF=true ./init/build-and-publish.sh
 ```
 
-### Output
-
-Assets are uploaded to:
-
-```text
-gs://<map-static-bucket>/current/
-gs://<map-static-bucket>/releases/<release-id>/
-```
-
-Main URLs are stored in `.env`:
+Main output URLs:
 
 ```text
 PMTILES_URL
@@ -88,24 +121,7 @@ STYLE_URL
 MANIFEST_URL
 ```
 
-### Check
-
-```bash
-source .env
-
-curl -I "${STYLE_URL}"
-
-curl -H "Range: bytes=0-1023" -I "${PMTILES_URL}"
-```
-
-Expected:
-
-```text
-HTTP 200 for style.json
-HTTP 206 for PMTiles
-```
-
-Map assets are uploaded by the dedicated service account:
+Map assets are published by the dedicated service account:
 
 ```text
 offline-map-assets-publisher
