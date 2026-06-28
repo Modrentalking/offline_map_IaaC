@@ -128,3 +128,9 @@ resource "google_storage_bucket_iam_member" "map_assets_publisher_legacy_bucket_
   role   = "roles/storage.legacyBucketReader"
   member = "serviceAccount:${google_service_account.map_assets_publisher.email}"
 }
+resource "google_service_account_iam_member" "github_actions_map_assets_publisher_token_creator" {
+  service_account_id = google_service_account.map_assets_publisher.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+
+  member = "serviceAccount:offline-map-github-actions@${var.project_id}.iam.gserviceaccount.com"
+}
