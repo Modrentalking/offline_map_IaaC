@@ -1,0 +1,67 @@
+name: Terraform Check
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "terraform/**"
+      - "init/**"
+      - ".github/workflows/terraform-check.yml"
+      - "README.md"
+
+  pull_request:
+    branches:
+      - master
+    paths:
+      - "terraform/**"
+      - "init/**"
+      - ".github/workflows/terraform-check.yml"
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-check:
+    name: Terraform check
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check forbidden files
+        run: |
+          echo "Checking forbidden files..."
+
+          forbidden_files="$(git ls-files | grep -E '\.env$|\.pbf$|\.pmtiles$|\.mbtiles$|terraform\.tfstate|terraform\.tfvars|init/dist/.+' | grep -v '^init/dist/.gitkeep$' || true)"
+
+          if [[ -n "${forbidden_files}" ]]; then
+            echo "Forbidden files found:"
+            echo "${forbidden_files}"
+            exit 1
+          fi
+
+          echo "OK"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        working-directory: terraform/envs/dev
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init without backend
+        working-directory: terraform/envs/dev
+        run: terraform init -backend=false
+
+      - name: Terraform validate
+        working-directory: terraform/envs/dev
+        run: terraform validate
