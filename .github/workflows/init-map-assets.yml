@@ -30,6 +30,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: init-map-assets
+  cancel-in-progress: false
+
 env:
   TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
 
@@ -37,8 +41,10 @@ jobs:
   init-map-assets:
     name: Build and publish map assets
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
-    if: ${{ inputs.confirm_init == 'INIT' }}
+    environment:
+      name: dev
 
     defaults:
       run:
@@ -48,10 +54,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Normalize GitHub variables
+      - name: Validate inputs and normalize GitHub variables
         id: ci_vars
         run: |
           set -euo pipefail
+
+          CONFIRM_INIT="$(printf '%s' '${{ inputs.confirm_init }}' | tr -d '\r\n')"
+
+          if [[ "${CONFIRM_INIT}" != "INIT" ]]; then
+            echo "ERROR: confirm_init must be exactly INIT"
+            exit 1
+          fi
 
           PROJECT_ID="$(printf '%s' '${{ vars.GCP_PROJECT_ID }}' | tr -d '\r\n[:space:]')"
           REGION="$(printf '%s' '${{ vars.GCP_REGION }}' | tr -d '\r\n[:space:]')"
@@ -64,15 +77,26 @@ jobs:
           test -n "${SERVICE_ACCOUNT}" || (echo "GCP_SERVICE_ACCOUNT is empty" && exit 1)
           test -n "${WIF_PROVIDER}" || (echo "GCP_WORKLOAD_IDENTITY_PROVIDER is empty" && exit 1)
           test -n "${STATE_BUCKET}" || (echo "TF_STATE_BUCKET is empty" && exit 1)
+          test -n "${TF_VAR_db_password}" || (echo "DB_PASSWORD secret is empty" && exit 1)
 
-          echo "project_id=${PROJECT_ID}" >> "$GITHUB_OUTPUT"
-          echo "region=${REGION}" >> "$GITHUB_OUTPUT"
-          echo "service_account=${SERVICE_ACCOUNT}" >> "$GITHUB_OUTPUT"
-          echo "wif_provider=${WIF_PROVIDER}" >> "$GITHUB_OUTPUT"
-          echo "state_bucket=${STATE_BUCKET}" >> "$GITHUB_OUTPUT"
+          RELEASE_ID="gha-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
 
-          echo "TF_VAR_project_id=${PROJECT_ID}" >> "$GITHUB_ENV"
-          echo "TF_VAR_region=${REGION}" >> "$GITHUB_ENV"
+          echo "project_id=${PROJECT_ID}" >> "${GITHUB_OUTPUT}"
+          echo "region=${REGION}" >> "${GITHUB_OUTPUT}"
+          echo "service_account=${SERVICE_ACCOUNT}" >> "${GITHUB_OUTPUT}"
+          echo "wif_provider=${WIF_PROVIDER}" >> "${GITHUB_OUTPUT}"
+          echo "state_bucket=${STATE_BUCKET}" >> "${GITHUB_OUTPUT}"
+          echo "release_id=${RELEASE_ID}" >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "PROJECT_ID=${PROJECT_ID}"
+            echo "REGION=${REGION}"
+            echo "TF_VAR_project_id=${PROJECT_ID}"
+            echo "TF_VAR_region=${REGION}"
+            echo "RELEASE_ID=${RELEASE_ID}"
+            echo "FORCE_DOWNLOAD_PBF=${{ inputs.force_download_pbf }}"
+            echo "ALLOW_REPUBLISH=${{ inputs.allow_republish }}"
+          } >> "${GITHUB_ENV}"
 
       - name: Auth to Google Cloud
         uses: google-github-actions/auth@v3
@@ -80,6 +104,7 @@ jobs:
           project_id: ${{ steps.ci_vars.outputs.project_id }}
           workload_identity_provider: ${{ steps.ci_vars.outputs.wif_provider }}
           service_account: ${{ steps.ci_vars.outputs.service_account }}
+          create_credentials_file: true
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -89,79 +114,195 @@ jobs:
         with:
           terraform_wrapper: false
 
+      - name: Check tools
+        run: |
+          set -euo pipefail
+
+          gcloud --version
+          terraform version
+          docker version
+          wget --version | head -n 1
+          curl --version | head -n 1
+
+          echo
+          echo "Disk space:"
+          df -h
+
       - name: Terraform init
         working-directory: terraform/envs/dev
-        run: terraform init -input=false
+        run: |
+          set -euo pipefail
+          terraform init -input=false
 
       - name: Generate .env from Terraform outputs
-        run: ./init/generate-env-from-terraform.sh
-
-      - name: Show generated init config
+        id: init_env
         run: |
           set -euo pipefail
-          source .env
 
-          echo "PROJECT_ID=${PROJECT_ID}"
-          echo "REGION=${REGION}"
-          echo "MAP_BUCKET=${MAP_BUCKET}"
-          echo "PUBLISHER_SA=${PUBLISHER_SA}"
-          echo "PMTILES_URL=${PMTILES_URL}"
-          echo "STYLE_URL=${STYLE_URL}"
-          echo "MANIFEST_URL=${MANIFEST_URL}"
+          ./init/generate-env-from-terraform.sh
+
+          # Override generated FORCE_DOWNLOAD_PBF by workflow input.
+          sed -i "s/^FORCE_DOWNLOAD_PBF=.*/FORCE_DOWNLOAD_PBF=\"${FORCE_DOWNLOAD_PBF}\"/" .env
+
+          source ./init/lib/env.sh
+
+          test -n "${PROJECT_ID}" || (echo "PROJECT_ID is empty" && exit 1)
+          test -n "${REGION}" || (echo "REGION is empty" && exit 1)
+          test -n "${MAP_BUCKET}" || (echo "MAP_BUCKET is empty" && exit 1)
+          test -n "${PUBLISHER_SA}" || (echo "PUBLISHER_SA is empty" && exit 1)
+          test -n "${STYLE_URL}" || (echo "STYLE_URL is empty" && exit 1)
+          test -n "${PMTILES_URL}" || (echo "PMTILES_URL is empty" && exit 1)
+          test -n "${MANIFEST_URL}" || (echo "MANIFEST_URL is empty" && exit 1)
+
+          echo "map_bucket=${MAP_BUCKET}" >> "${GITHUB_OUTPUT}"
+          echo "publisher_sa=${PUBLISHER_SA}" >> "${GITHUB_OUTPUT}"
+          echo "style_url=${STYLE_URL}" >> "${GITHUB_OUTPUT}"
+          echo "pmtiles_url=${PMTILES_URL}" >> "${GITHUB_OUTPUT}"
+          echo "manifest_url=${MANIFEST_URL}" >> "${GITHUB_OUTPUT}"
+
+          echo "Generated init config:"
+          grep -E '^(PROJECT_ID|REGION|MAP_BUCKET|PUBLISHER_SA|PMTILES_URL|STYLE_URL|MANIFEST_URL|FORCE_DOWNLOAD_PBF)=' .env
 
       - name: Check if init already published
+        id: guard
         run: |
           set -euo pipefail
-          source .env
 
-          if gcloud storage ls "gs://${MAP_BUCKET}/manifest.json" >/dev/null 2>&1; then
-            echo "manifest.json already exists in gs://${MAP_BUCKET}/manifest.json"
+          source ./init/lib/env.sh
 
-            if [[ "${{ inputs.allow_republish }}" != "true" ]]; then
-              echo "Init already appears to be published."
-              echo "Re-run with allow_republish=true if you really want to publish again."
-              exit 1
+          echo "Checking:"
+          echo "gs://${MAP_BUCKET}/manifest.json"
+
+          if gcloud storage ls "gs://${MAP_BUCKET}/manifest.json" \
+            --project="${PROJECT_ID}" \
+            --impersonate-service-account="${PUBLISHER_SA}" >/dev/null 2>&1; then
+
+            echo "manifest_exists=true" >> "${GITHUB_OUTPUT}"
+
+            if [[ "${ALLOW_REPUBLISH}" != "true" ]]; then
+              echo "skip=true" >> "${GITHUB_OUTPUT}"
+              echo "manifest.json already exists and allow_republish=false. Skipping build and publish."
+            else
+              echo "skip=false" >> "${GITHUB_OUTPUT}"
+              echo "manifest.json exists, but allow_republish=true. Continuing."
             fi
-
-            echo "allow_republish=true, continuing..."
           else
-            echo "No manifest.json found, continuing first init..."
+            echo "manifest_exists=false" >> "${GITHUB_OUTPUT}"
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+            echo "No manifest.json found. Continuing first init."
           fi
 
       - name: Fetch map assets
-        run: ./init/fetch-map-assets-from-github.sh
-
-      - name: Build PMTiles
-        env:
-          FORCE_DOWNLOAD_PBF: ${{ inputs.force_download_pbf }}
-        run: ./init/build-map.sh
-
-      - name: Publish map assets to GCS
-        run: ./init/publish-map-assets.sh
-
-      - name: Verify published assets
+        if: ${{ steps.guard.outputs.skip != 'true' }}
         run: |
           set -euo pipefail
-          source .env
+          ./init/fetch-map-assets-from-github.sh
 
-          echo "Checking style:"
-          curl -I "${STYLE_URL}"
+      - name: Build PMTiles
+        if: ${{ steps.guard.outputs.skip != 'true' }}
+        run: |
+          set -euo pipefail
 
-          echo "Checking PMTiles Range:"
-          curl -H "Range: bytes=0-1023" -I "${PMTILES_URL}"
+          source ./init/lib/env.sh
+
+          echo "FORCE_DOWNLOAD_PBF=${FORCE_DOWNLOAD_PBF}"
+          echo "RELEASE_ID=${RELEASE_ID}"
+
+          ./init/build-map.sh
+
+      - name: Publish map assets to GCS
+        if: ${{ steps.guard.outputs.skip != 'true' }}
+        run: |
+          set -euo pipefail
+
+          source ./init/lib/env.sh
+
+          echo "Project: ${PROJECT_ID}"
+          echo "Bucket: gs://${MAP_BUCKET}"
+          echo "Publisher SA: ${PUBLISHER_SA}"
+          echo "Release ID: ${RELEASE_ID}"
+
+          ./init/publish-map-assets.sh
+
+      - name: Verify published assets
+        if: ${{ steps.guard.outputs.skip != 'true' }}
+        id: verify
+        run: |
+          set -euo pipefail
+
+          source ./init/lib/env.sh
+
+          echo "Checking STYLE_URL:"
+          echo "${STYLE_URL}"
+
+          STYLE_CODE="$(curl -L -sS -o /tmp/style.json -w '%{http_code}' "${STYLE_URL}")"
+
+          if [[ "${STYLE_CODE}" != "200" ]]; then
+            echo "ERROR: STYLE_URL returned HTTP ${STYLE_CODE}, expected 200"
+            exit 1
+          fi
+
+          echo "Checking PMTILES_URL with Range:"
+          echo "${PMTILES_URL}"
+
+          PMTILES_CODE="$(curl -L -sS -o /tmp/pmtiles.range -w '%{http_code}' \
+            -H "Range: bytes=0-1023" \
+            "${PMTILES_URL}")"
+
+          if [[ "${PMTILES_CODE}" != "206" ]]; then
+            echo "ERROR: PMTILES_URL Range returned HTTP ${PMTILES_CODE}, expected 206"
+            exit 1
+          fi
+
+          echo "Checking MANIFEST_URL:"
+          echo "${MANIFEST_URL}"
+
+          MANIFEST_CODE="$(curl -L -sS -o /tmp/manifest.json -w '%{http_code}' "${MANIFEST_URL}")"
+
+          if [[ "${MANIFEST_CODE}" != "200" ]]; then
+            echo "ERROR: MANIFEST_URL returned HTTP ${MANIFEST_CODE}, expected 200"
+            exit 1
+          fi
+
+          echo "style_code=${STYLE_CODE}" >> "${GITHUB_OUTPUT}"
+          echo "pmtiles_code=${PMTILES_CODE}" >> "${GITHUB_OUTPUT}"
+          echo "manifest_code=${MANIFEST_CODE}" >> "${GITHUB_OUTPUT}"
 
       - name: Summary
         if: always()
         run: |
-          echo "## Init Map Assets" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
 
           if [[ -f ".env" ]]; then
-            source .env
-            echo "- Bucket: \`${MAP_BUCKET}\`" >> "$GITHUB_STEP_SUMMARY"
-            echo "- PMTiles: \`${PMTILES_URL}\`" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Style: \`${STYLE_URL}\`" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Manifest: \`${MANIFEST_URL}\`" >> "$GITHUB_STEP_SUMMARY"
+            source ./init/lib/env.sh
           else
-            echo "- .env was not generated" >> "$GITHUB_STEP_SUMMARY"
+            MAP_BUCKET=""
+            PUBLISHER_SA=""
+            STYLE_URL=""
+            PMTILES_URL=""
+            MANIFEST_URL=""
           fi
+
+          {
+            echo "## Init Map Assets"
+            echo
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Job status | \`${{ job.status }}\` |"
+            echo "| Release ID | \`${RELEASE_ID:-${{ steps.ci_vars.outputs.release_id }}}\` |"
+            echo "| Force PBF download | \`${{ inputs.force_download_pbf }}\` |"
+            echo "| Allow republish | \`${{ inputs.allow_republish }}\` |"
+            echo "| Manifest existed | \`${{ steps.guard.outputs.manifest_exists || 'unknown' }}\` |"
+            echo "| Skipped | \`${{ steps.guard.outputs.skip || 'false' }}\` |"
+            echo "| Bucket | \`gs://${MAP_BUCKET}\` |"
+            echo "| Publisher SA | \`${PUBLISHER_SA}\` |"
+            echo "| PMTiles | ${PMTILES_URL} |"
+            echo "| Style | ${STYLE_URL} |"
+            echo "| Manifest | ${MANIFEST_URL} |"
+            echo
+            echo "### Verify"
+            echo
+            echo "- STYLE_URL: expected HTTP 200"
+            echo "- PMTILES_URL with Range: expected HTTP 206"
+            echo "- MANIFEST_URL: expected HTTP 200"
+          } >> "${GITHUB_STEP_SUMMARY}"
