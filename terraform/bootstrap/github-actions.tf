@@ -81,14 +81,16 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.ref"        = "assertion.ref"
   }
 
-  attribute_condition = "assertion.repository == '${var.github_repository}'"
+  attribute_condition = "assertion.repository in ${jsonencode(var.github_repositories)}"
 }
 
 resource "google_service_account_iam_member" "github_actions_workload_identity_user" {
+  for_each = toset(var.github_repositories)
+
   service_account_id = google_service_account.github_actions.name
   role               = "roles/iam.workloadIdentityUser"
 
-  member = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repository}"
+  member = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${each.value}"
 }
 
 resource "google_service_account_iam_member" "local_user_token_creator" {

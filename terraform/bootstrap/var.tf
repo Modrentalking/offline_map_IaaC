@@ -19,10 +19,13 @@ variable "region" {
   }
 }
 
-variable "github_repository" {
-  description = "GitHub repository allowed to run Terraform from GitHub Actions"
-  type        = string
-  default     = "Modrentalking/offline_map_IaaC"
+variable "github_repositories" {
+  type = list(string)
+
+  default = [
+    "Modrentalking/offline_map_IaaC",
+    "Modrentalking/Map"
+  ]
 }
 
 variable "local_impersonation_user" {
